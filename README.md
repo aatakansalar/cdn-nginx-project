@@ -221,7 +221,7 @@ docker build -t yourusername/default-image-server:latest .
 cd ../resized-image-server
 docker build -t yourusername/resized-image-server:latest .
 
-cd ../origin
+cd ../origin-server
 docker build -t yourusername/image-origin:latest .
 
 cd ../preload
