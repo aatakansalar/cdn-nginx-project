@@ -1,0 +1,226 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: resizer-config
+data:
+  nginx.conf: |
+    user root;
+
+    load_module modules/ngx_http_image_filter_module.so;
+
+    worker_processes auto;
+    error_log /usr/local/openresty/nginx/logs/error.log debug;
+    pid /usr/local/openresty/nginx/logs/nginx.pid;
+
+    events {
+        worker_connections 1024;
+        multi_accept on;
+    }
+
+    http {
+        lua_shared_dict cache_lock 10m;
+
+        include       mime.types;
+        default_type  application/octet-stream;
+
+        # Lua module search path
+        lua_package_path "/etc/nginx/lua/?.lua;;";
+
+        # Log format with cache status
+        log_format  main  '$remote_addr - $remote_user [$time_local] "$request" '
+                          '$status $body_bytes_sent "$http_referer" "$http_user_agent" '
+                          '"$http_x_forwarded_for" cache_status=$upstream_cache_status';
+
+        access_log /usr/local/openresty/nginx/logs/access.log main;
+
+        sendfile        on;
+        keepalive_timeout  65;
+
+        # Gzip Settings
+        gzip on;
+        gzip_disable "msie6";
+
+        # Map to determine if resizing is needed
+        map $arg_width$arg_height $resize {
+            default       0;
+            ~.+           1;
+        }
+
+        # Validation maps for dimensions
+        map $arg_width $validated_width {
+            default   800;
+            ~^\d+$    $arg_width;
+        }
+
+        map $arg_height $validated_height {
+            default   600;
+            ~^\d+$    $arg_height;
+        }
+
+        # Shared memory zones for rate limiting
+        limit_req_zone $binary_remote_addr zone=resizing_zone:10m rate=65535/s;
+        limit_conn_zone $binary_remote_addr zone=conn_limit_per_ip:10m;
+
+        include /etc/nginx/conf.d/*.conf;
+    }
+  resizer.conf: |
+    server {
+        listen 80;
+        server_name resizer;
+
+        resolver kube-dns.kube-system.svc.cluster.local valid=30s;
+
+        add_header X-Cache-Status $upstream_cache_status always;
+
+        limit_req zone=resizing_zone burst=50 nodelay;
+        limit_conn conn_limit_per_ip 65535;
+
+        location /lua_test {
+            default_type 'text/plain';
+            content_by_lua_block {
+                ngx.say("Lua is working on the resizer!")
+            }
+        }
+
+        location /stub_status {
+            stub_status;
+            allow all;
+        }
+        location /images/ {
+            # Authentication check
+            access_by_lua_file /etc/nginx/lua/validate_hmac.lua;
+
+            set $cache_key $scheme$host$request_uri;
+
+            content_by_lua_block {
+                local cache = require "redis_cache"
+                local cache_key = ngx.var.cache_key
+
+                -- Try to get from redis cache
+                local res = cache.get(cache_key)
+                if res then
+                    ngx.header["X-Cache-Status"] = "HIT"
+                    ngx.header["Content-Type"] = "image/jpeg"
+                    ngx.print(res)
+                    return
+                end
+
+                -- Cache'de yoksa, resmi al ve yeniden boyutlandır
+                local res = ngx.location.capture("/resize_image")
+
+                if res.status ~= 200 then
+                    ngx.status = res.status
+                    ngx.say("Error processing image: ", res.body)
+                    return
+                end
+
+                -- Redis'e kaydet
+                cache.set(cache_key, res.body, 86400) -- 24 saat cache'le
+
+                ngx.header["X-Cache-Status"] = "MISS"
+                ngx.header["Content-Type"] = "image/jpeg"
+                ngx.print(res.body)
+            }
+
+            add_header Content-Disposition 'inline; filename=$uri' always;
+            add_header Cache-Control "public, max-age=43200" always;
+        }
+
+        location /resize_image {
+            internal;
+
+            proxy_pass http://image-origin.default.svc.cluster.local:5000$request_uri;
+
+            # Resim boyutlandırma
+            image_filter resize $validated_width $validated_height;
+            image_filter_buffer 10M;
+
+            types { }
+            default_type image/jpeg;
+        }
+    }
+  redis_cache.lua: |
+    local redis = require "resty.redis"
+
+    local function cache_get(cache_key)
+        local red = redis:new()
+        red:set_timeout(1000) -- 1 second timeout
+
+        -- Connect to Redis
+        local ok, err = red:connect("redis.default.svc.cluster.local", 6379)
+        if not ok then
+            ngx.log(ngx.ERR, "Failed to connect to Redis: ", err)
+            return nil
+        end
+
+        -- Try to get data
+        local res, err = red:get(cache_key)
+        if not res then
+            ngx.log(ngx.ERR, "Failed to get key from Redis: ", err)
+            return nil
+        end
+
+        if res == ngx.null then
+            return nil
+        end
+
+        return res
+    end
+
+    local function cache_set(cache_key, data, ttl)
+        local red = redis:new()
+        red:set_timeout(1000) -- 1 second timeout
+
+        -- Connect to Redis
+        local ok, err = red:connect("redis.default.svc.cluster.local", 6379)
+        if not ok then
+            ngx.log(ngx.ERR, "Failed to connect to Redis: ", err)
+            return
+        end
+
+        -- Set data with expiration
+        local ok, err = red:setex(cache_key, ttl, data)
+        if not ok then
+            ngx.log(ngx.ERR, "Failed to set key in Redis: ", err)
+        end
+    end
+
+    return {
+        get = cache_get,
+        set = cache_set,
+    }
+  validate_hmac.lua: |
+    ngx.log(ngx.ERR, "validate_hmac.lua is being executed")
+
+    local file = io.open("/etc/secret-volume/secret_key", "r")
+    local secret_key = file:read("*a")
+    file:close()
+
+    secret_key = secret_key:gsub("\n", "")
+
+    local hmac_signature = ngx.var.arg_hmac
+
+    if not hmac_signature then
+        ngx.log(ngx.ERR, "Missing HMAC signature")
+        return ngx.exit(ngx.HTTP_FORBIDDEN)
+    end
+
+    local uri = ngx.var.request_uri
+
+    local uri_without_hmac = ngx.re.sub(uri, [[(&|\?)hmac=[^&]*]], "", "jo")
+    ngx.log(ngx.ERR, "URI without hmac: ", uri_without_hmac)
+
+    local cmd = string.format("echo -n '%s' | openssl dgst -sha256 -hmac '%s' -binary | openssl base64 | tr '+/' '-_' | tr -d '='", uri_without_hmac, secret_key)
+    local handle = io.popen(cmd)
+    local expected_signature = handle:read("*a")
+    handle:close()
+
+    expected_signature = expected_signature:gsub("\n", "")
+    ngx.log(ngx.ERR, "Expected Signature: ", expected_signature)
+    ngx.log(ngx.ERR, "Provided Signature: ", hmac_signature)
+
+    if hmac_signature ~= expected_signature then
+        ngx.log(ngx.ERR, "Invalid HMAC signature")
+        return ngx.exit(ngx.HTTP_FORBIDDEN)
+    end
+

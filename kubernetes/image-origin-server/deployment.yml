@@ -1,0 +1,22 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: image-origin
+  labels:
+    app: image-origin
+spec:
+  replicas: 20
+  selector:
+    matchLabels:
+      app: image-origin
+  template:
+    metadata:
+      labels:
+        app: image-origin
+    spec:
+      containers:
+        - name: image-origin
+          image: image-origin-server:latest
+          imagePullPolicy: Never 
+          ports:
+            - containerPort: 5000

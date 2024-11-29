@@ -1,0 +1,50 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: resizer
+  labels:
+    app: resizer
+spec:
+  replicas: 20
+  selector:
+    matchLabels:
+      app: resizer
+  template:
+    metadata:
+      labels:
+        app: resizer
+    spec:
+      containers:
+        - name: resizer
+          image:  resizer-nginx-server:latest  
+          imagePullPolicy: Never 
+          ports:
+            - containerPort: 80
+            - containerPort: 8080 
+          volumeMounts:
+            - name: config-volume
+              mountPath: /etc/nginx/nginx.conf
+              subPath: nginx.conf
+            - name: config-volume
+              mountPath: /etc/nginx/conf.d/resizer.conf
+              subPath: resizer.conf
+            - name: lua-scripts
+              mountPath: /etc/nginx/lua
+            - name: secret-volume
+              mountPath: /etc/secret-volume
+              readOnly: true
+      volumes:
+          - name: config-volume
+            configMap:
+              name: resizer-config
+          - name: lua-scripts
+            configMap:
+              name: resizer-config
+              items:
+                - key: redis_cache.lua
+                  path: redis_cache.lua
+                - key: validate_hmac.lua
+                  path: validate_hmac.lua
+          - name: secret-volume
+            secret:
+              secretName: hmac-secret

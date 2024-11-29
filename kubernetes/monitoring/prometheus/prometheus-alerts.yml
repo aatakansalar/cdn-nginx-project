@@ -1,0 +1,26 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: prometheus-alerts
+data:
+  prometheus-alerts.yml: |
+    groups:
+      - name: nginx-cdn-alerts
+        rules:
+          - alert: CacheHitRatioLow
+            expr: (sum(rate(nginx_cache_hits[5m])) / sum(rate(nginx_requests_total[5m]))) < 0.8
+            for: 5m
+            labels:
+              severity: critical
+            annotations:
+              summary: "Cache hit ratio is below 80%"
+              description: "The cache hit ratio has been below 80% for the last 5 minutes."
+
+          - alert: HighCpuUsageResizer
+            expr: rate(container_cpu_usage_seconds_total[5m]) > 0.9
+            for: 2m
+            labels:
+              severity: warning
+            annotations:
+              summary: "High CPU usage on Resizer service"
+              description: "CPU usage on resizer pods has exceeded 90% for the last 2 minutes."

@@ -1,0 +1,42 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: frontend
+  labels:
+    app: frontend
+spec:
+  replicas: 20
+  selector:
+    matchLabels:
+      app: frontend
+  template:
+    metadata:
+      labels:
+        app: frontend
+    spec:
+      containers:
+        - name: frontend
+          image: regular-nginx-server:latest 
+          imagePullPolicy: Never 
+          ports:
+            - containerPort: 80
+            - containerPort: 8080 
+          volumeMounts:
+            - name: config-volume
+              mountPath: /etc/nginx/nginx.conf
+              subPath: nginx.conf
+            - name: config-volume
+              mountPath: /etc/nginx/conf.d/frontend.conf
+              subPath: frontend.conf
+            - name: lua-scripts
+              mountPath: /etc/nginx/lua
+      volumes:
+          - name: config-volume
+            configMap:
+              name: frontend-config
+          - name: lua-scripts
+            configMap:
+              name: frontend-config
+              items:
+                - key: redis_cache.lua
+                  path: redis_cache.lua

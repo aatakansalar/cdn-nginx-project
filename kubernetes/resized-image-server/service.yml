@@ -1,0 +1,14 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: resizer
+spec:
+  selector:
+    app: resizer
+  ports:
+    - name: http
+      port: 80
+      targetPort: 80
+    - name: metrics
+      port: 8080
+      targetPort: 8080

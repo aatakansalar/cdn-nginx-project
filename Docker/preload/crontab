@@ -1,0 +1,1 @@
+0 * * * * /app/preload_cache.sh >> /app/preload_log.txt 2>&1
